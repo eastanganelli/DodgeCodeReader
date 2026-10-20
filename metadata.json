@@ -1,5 +1,0 @@
-{
-  "name": "LumenTrace: Light Pulse Analyzer",
-  "description": "Analyze video files to detect and count light toggles (on/off) using computer vision techniques.",
-  "requestFramePermissions": []
-}

@@ -1,948 +1,366 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Camera, FolderOpen, Search, Play, X, ChevronRight, Trash2, Lightbulb } from 'lucide-react';
+import { STRINGS, Lang, detectLang } from './i18n';
+import { SettingsBar, TextSize, Theme } from './components/Settings';
+import { VideoStage } from './components/VideoStage';
+import { findBlinkingLight, analyzeVideo, Region } from './lib/videoAnalyzer';
+import { DEFAULT_DECODER_CONFIG, DecoderSnapshot, Sample } from './lib/pulseDecoder';
+import { buildReport } from './lib/report';
+import { lookupCode } from './data/codes';
+import { load, save, loadHistory, addHistory, clearHistory, HistoryItem } from './lib/storage';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { 
-  Upload, 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  Activity, 
-  Settings, 
-  Maximize2, 
-  Info,
-  CheckCircle2,
-  AlertCircle,
-  Zap
-} from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
-  ReferenceLine
-} from 'recharts';
+// Results (with the chart library) loads on demand to keep the first screen light.
+const Results = lazy(() => import('./components/Results').then(m => ({ default: m.Results })));
 
-// Types
-interface DetectionPoint {
-  frame: number;
-  time: number;
-  brightness: number;
-  state: 'on' | 'off';
-}
-
-interface ROI {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-interface Code {
-  digit1: number;
-  digit2: number;
-}
+type Screen = 'home' | 'locate' | 'reading' | 'results';
 
 export default function App() {
-  const [videoFile, setVideoFile] = useState<File | null>(null);
+  // ---------- preferences ----------
+  const [lang, setLangState] = useState<Lang>(() => load<Lang>('dcr.lang', detectLang()));
+  const [size, setSizeState] = useState<TextSize>(() => load<TextSize>('dcr.size', 0));
+  const [theme, setThemeState] = useState<Theme>(() =>
+    load<Theme>('dcr.theme', window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  const setLang = (l: Lang) => { setLangState(l); save('dcr.lang', l); };
+  const setSize = (s: TextSize) => { setSizeState(s); save('dcr.size', s); };
+  const setTheme = (th: Theme) => { setThemeState(th); save('dcr.theme', th); };
+  const t = STRINGS[lang];
+
+  useEffect(() => {
+    const el = document.documentElement;
+    el.lang = lang;
+    el.dataset.size = String(size);
+    el.dataset.theme = theme;
+    document.title = t.appName;
+  }, [lang, size, theme, t]);
+
+  // ---------- flow state ----------
+  const [screen, setScreen] = useState<Screen>('home');
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [videoName, setVideoName] = useState('');
+  const [aspect, setAspect] = useState(16 / 9);
+  const [duration, setDuration] = useState(0);
+  const [range, setRange] = useState<[number, number]>([0, 0]);
+  const [region, setRegion] = useState<Region | null>(null);
+  const [findState, setFindState] = useState<'idle' | 'finding' | 'found' | 'notfound'>('idle');
+  const [findProgress, setFindProgress] = useState(0);
+
+  const [autoSens, setAutoSens] = useState(true);
+  const [manualThreshold, setManualThreshold] = useState(128);
+  const [digitGap, setDigitGap] = useState(DEFAULT_DECODER_CONFIG.digitGap);
+  const [codeGap, setCodeGap] = useState(DEFAULT_DECODER_CONFIG.codeGap);
+
   const [progress, setProgress] = useState(0);
-  const [brightnessData, setBrightnessData] = useState<DetectionPoint[]>([]);
-  const [threshold, setThreshold] = useState(128);
-  const [isAutoThreshold, setIsAutoThreshold] = useState(true);
-  const [toggleCount, setToggleCount] = useState(0);
-  const [codes, setCodes] = useState<Code[]>([]);
-  const [currentDigitCount, setCurrentDigitCount] = useState(0);
-  const [currentCodeDigits, setCurrentCodeDigits] = useState<number[]>([]);
-  const [roi, setRoi] = useState<ROI>({ x: 0, y: 0, width: 100, height: 100 });
-  const [analysisStartTime, setAnalysisStartTime] = useState(0);
-  const [analysisEndTime, setAnalysisEndTime] = useState(0);
-  const [isSelectingROI, setIsSelectingROI] = useState(false);
-  const [roiStart, setRoiStart] = useState<{ x: number, y: number } | null>(null);
-  const [opencvLoaded, setOpencvLoaded] = useState(false);
+  const [live, setLive] = useState<{ sample?: Sample; snap?: DecoderSnapshot }>({});
+  const [result, setResult] = useState<{ codes: number[]; samples?: Sample[]; date: Date } | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>(() => loadHistory());
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
-  const requestRef = useRef<number | null>(null);
-  const lastPulseEndTimeRef = useRef<number>(0);
-  const lastStateRef = useRef<'on' | 'off'>('off');
-  const currentDigitCountRef = useRef<number>(0);
-  const currentCodeDigitsRef = useRef<number[]>([]);
-  const codesRef = useRef<Code[]>([]);
-  const brightnessWindowRef = useRef<number[]>([]);
-  const isAutoThresholdRef = useRef(isAutoThreshold);
-  const analysisStartTimeRef = useRef(analysisStartTime);
-  const analysisEndTimeRef = useRef(analysisEndTime);
+  const abortRef = useRef<AbortController | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
-  // Load OpenCV.js
-  useEffect(() => {
-    // Check if cv is already loaded globally
-    // @ts-ignore
-    if (typeof cv !== 'undefined' && cv.Mat) {
-      setOpencvLoaded(true);
-      return;
-    }
+  // move focus to the new screen's heading for screen-reader & keyboard users
+  useEffect(() => { headingRef.current?.focus(); }, [screen]);
 
-    // Check if script is already in the document
-    const scriptId = 'opencv-script';
-    let script = document.getElementById(scriptId) as HTMLScriptElement;
+  useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl); }, [videoUrl]);
 
-    if (!script) {
-      script = document.createElement('script');
-      script.id = scriptId;
-      script.src = 'https://docs.opencv.org/4.x/opencv.js';
-      script.async = true;
-      document.body.appendChild(script);
-    }
-
-    const checkCv = setInterval(() => {
-      // @ts-ignore
-      if (typeof cv !== 'undefined' && cv.Mat) {
-        setOpencvLoaded(true);
-        clearInterval(checkCv);
-      }
-    }, 500);
-
-    return () => {
-      clearInterval(checkCv);
-    };
-  }, []);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setVideoFile(file);
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
-      setBrightnessData([]);
-      setToggleCount(0);
-      setCodes([]);
-      setCurrentDigitCount(0);
-      setCurrentCodeDigits([]);
-      setProgress(0);
-      setThreshold(128);
-      thresholdRef.current = 128;
-      brightnessWindowRef.current = [];
-      setRoi({ x: 0, y: 0, width: 0, height: 0 });
-      setAnalysisStartTime(0);
-      setAnalysisEndTime(0);
-    }
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    abortRef.current?.abort();
+    setVideoUrl(URL.createObjectURL(f));
+    setVideoName(f.name);
+    setRegion(null);
+    setFindState('idle');
+    setScreen('locate');
   };
 
-  const handleLoadedMetadata = () => {
-    if (videoRef.current) {
-      setAnalysisEndTime(videoRef.current.duration);
-    }
-  };
-
-  const isProcessingRef = useRef(false);
-
-  const startProcessing = async () => {
-    if (!videoRef.current || !opencvLoaded || isProcessing) return;
-    
-    const video = videoRef.current;
-    
-    // Ensure video metadata is loaded and duration is valid
-    if (video.readyState < 1 || isNaN(video.duration) || video.duration === 0) {
-      alert("Video is still loading or invalid. Please wait a moment.");
-      return;
-    }
-    
-    // Ensure ROI is valid
-    if (roi.width <= 0 || roi.height <= 0) {
-      alert("Please select a detection zone by clicking and dragging on the video.");
-      return;
-    }
-    
-    setIsProcessing(true);
-    isProcessingRef.current = true;
-    setBrightnessData([]);
-    setToggleCount(0);
-    setCodes([]);
-    setCurrentDigitCount(0);
-    setCurrentCodeDigits([]);
-    setProgress(0);
-    setThreshold(128);
-    thresholdRef.current = 128;
-    brightnessWindowRef.current = [];
-    
-    lastPulseEndTimeRef.current = 0;
-    lastStateRef.current = 'off';
-    currentDigitCountRef.current = 0;
-    currentCodeDigitsRef.current = [];
-    codesRef.current = [];
-    
-    if (Math.abs(video.currentTime - analysisStartTime) < 0.01) {
-      processNextFrame();
-    } else {
-      video.currentTime = analysisStartTime;
-      video.pause();
-      
-      // Wait for seek to complete before starting
-      const onSeeked = () => {
-        video.removeEventListener('seeked', onSeeked);
-        processNextFrame();
-      };
-      video.addEventListener('seeked', onSeeked);
-    }
-  };
-
-  const roiRef = useRef(roi);
-  const thresholdRef = useRef(threshold);
-
-  useEffect(() => {
-    roiRef.current = roi;
-  }, [roi]);
-
-  useEffect(() => {
-    thresholdRef.current = threshold;
-  }, [threshold]);
-
-  useEffect(() => {
-    isAutoThresholdRef.current = isAutoThreshold;
-  }, [isAutoThreshold]);
-
-  useEffect(() => {
-    analysisStartTimeRef.current = analysisStartTime;
-  }, [analysisStartTime]);
-
-  useEffect(() => {
-    analysisEndTimeRef.current = analysisEndTime;
-  }, [analysisEndTime]);
-
-  const finalizeCode = useCallback(() => {
-    if (currentCodeDigitsRef.current.length > 0) {
-      const newCode: Code = {
-        digit1: currentCodeDigitsRef.current[0],
-        digit2: currentCodeDigitsRef.current.length > 1 ? currentCodeDigitsRef.current[1] : 0
-      };
-      codesRef.current = [...codesRef.current, newCode];
-      setCodes([...codesRef.current]);
-      currentCodeDigitsRef.current = [];
-      setCurrentCodeDigits([]);
-    }
-  }, []);
-
-  const finalizeDigit = useCallback(() => {
-    if (currentDigitCountRef.current > 0) {
-      currentCodeDigitsRef.current = [...currentCodeDigitsRef.current, currentDigitCountRef.current];
-      setCurrentCodeDigits([...currentCodeDigitsRef.current]);
-      currentDigitCountRef.current = 0;
-      setCurrentDigitCount(0);
-
-      // If we have 2 digits, finalize the code automatically
-      if (currentCodeDigitsRef.current.length >= 2) {
-        finalizeCode();
-      }
-    }
-  }, [finalizeCode]);
-
-  const processNextFrame = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || !isProcessingRef.current) {
-      console.log("Processing stopped or refs missing", { 
-        video: !!videoRef.current, 
-        canvas: !!canvasRef.current, 
-        isProcessing: isProcessingRef.current 
-      });
-      return;
-    }
-    
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    
-    if (!ctx) {
-      console.error("Failed to get canvas context");
-      return;
-    }
-
-    // Draw frame to hidden canvas
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    // Use OpenCV to process the ROI
+  const runFind = useCallback(async (start: number, end: number) => {
+    const v = videoRef.current;
+    if (!v) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setFindState('finding');
+    setFindProgress(0);
     try {
-      // @ts-ignore
-      const src = cv.imread(canvas);
-      
-      // Calculate scaling factors from overlay canvas display size to video resolution
-      const scaleX = canvas.width / (overlayCanvasRef.current?.width || 1);
-      const scaleY = canvas.height / (overlayCanvasRef.current?.height || 1);
-
-      // @ts-ignore
-      const rect = new cv.Rect(
-        Math.max(0, Math.floor(roiRef.current.x * scaleX)),
-        Math.max(0, Math.floor(roiRef.current.y * scaleY)),
-        Math.floor(roiRef.current.width * scaleX),
-        Math.floor(roiRef.current.height * scaleY)
-      );
-      
-      // Ensure rect is within bounds
-      rect.x = Math.min(rect.x, src.cols - 1);
-      rect.y = Math.min(rect.y, src.rows - 1);
-      rect.width = Math.min(rect.width, src.cols - rect.x);
-      rect.height = Math.min(rect.height, src.rows - rect.y);
-
-      if (rect.width > 0 && rect.height > 0) {
-        const roiMat = src.roi(rect);
-        // @ts-ignore
-        const mean = cv.mean(roiMat);
-        // mean[0], mean[1], mean[2] are R, G, B
-        const brightness = (mean[0] + mean[1] + mean[2]) / 3;
-        
-        // Auto Threshold Logic
-        if (isAutoThresholdRef.current) {
-          brightnessWindowRef.current.push(brightness);
-          if (brightnessWindowRef.current.length > 150) { // ~5 seconds at 30fps
-            brightnessWindowRef.current.shift();
-          }
-          
-          if (brightnessWindowRef.current.length > 20) {
-            const min = Math.min(...brightnessWindowRef.current);
-            const max = Math.max(...brightnessWindowRef.current);
-            const range = max - min;
-            
-            // Only update if there's a significant signal (range > 10)
-            if (range > 10) {
-              const targetThreshold = min + (range * 0.5); // Midpoint
-              
-              // If this is the first time we detect a signal, jump to it immediately
-              // Otherwise, apply damping to smooth the threshold movement
-              if (brightnessWindowRef.current.length < 30) {
-                thresholdRef.current = targetThreshold;
-                setThreshold(Math.round(targetThreshold));
-              } else {
-                const alpha = 0.1; // Smoothing factor
-                const newThreshold = (thresholdRef.current * (1 - alpha)) + (targetThreshold * alpha);
-                
-                // Only update React state if change is significant to avoid excessive re-renders
-                if (Math.abs(newThreshold - thresholdRef.current) > 1) {
-                  setThreshold(Math.round(newThreshold));
-                }
-                thresholdRef.current = newThreshold;
-              }
-            }
-          }
-        }
-        
-        const state = brightness > thresholdRef.current ? 'on' : 'off';
-        
-        // Pulse Detection Logic (Triggered on State Transitions)
-        if (lastStateRef.current === 'off' && state === 'on') {
-          // Pulse START: Decide what the previous gap meant
-          setToggleCount(c => c + 1);
-          
-          const gapTime = lastPulseEndTimeRef.current > 0 ? video.currentTime - lastPulseEndTimeRef.current : 0;
-          
-          if (lastPulseEndTimeRef.current > 0) {
-            console.log(`Pulse detected. Gap since last pulse: ${gapTime.toFixed(3)}s`);
-          }
-          
-          if (lastPulseEndTimeRef.current === 0) {
-            // First pulse of the session
-            currentDigitCountRef.current = 1;
-          } else if (gapTime < 1.1) {
-            // Same digit (< 1.1s gap)
-            currentDigitCountRef.current += 1;
-          } else if (gapTime < 2.0) {
-            // New digit in same code (approx 1.1s - 2.0s gap)
-            finalizeDigit();
-            currentDigitCountRef.current = 1;
-          } else {
-            // New code (> 2.0s gap)
-            finalizeDigit();
-            finalizeCode();
-            currentDigitCountRef.current = 1;
-          }
-          
-          setCurrentDigitCount(currentDigitCountRef.current);
-        } else if (lastStateRef.current === 'on' && state === 'off') {
-          // Pulse END: Record the timestamp to measure the next gap
-          lastPulseEndTimeRef.current = video.currentTime;
-        }
-
-        lastStateRef.current = state;
-        
-        setBrightnessData(prev => [...prev, {
-          frame: prev.length,
-          time: video.currentTime,
-          brightness,
-          state
-        }]);
-
-        roiMat.delete();
-      } else {
-        console.warn("ROI is empty or out of bounds", rect);
-      }
-      
-      src.delete();
-    } catch (err) {
-      console.error("CV Error during processing:", err);
+      const r = await findBlinkingLight(v, start, end, setFindProgress, ac.signal);
+      if (ac.signal.aborted) return;
+      setRegion(r);
+      setFindState(r ? 'found' : 'notfound');
+      v.currentTime = start;
+    } catch {
+      setFindState('notfound');
     }
+  }, []);
 
-    // Progress
-    const duration = analysisEndTimeRef.current - analysisStartTimeRef.current;
-    const currentProgress = duration > 0 ? ((video.currentTime - analysisStartTimeRef.current) / duration) * 100 : 0;
-    setProgress(Math.min(100, Math.max(0, currentProgress)));
-
-    // Seek to next frame (approx 30fps)
-    if (video.currentTime < analysisEndTimeRef.current && isProcessingRef.current) {
-      const nextTime = Math.min(analysisEndTimeRef.current, video.currentTime + 0.033);
-      
-      if (nextTime === video.currentTime) {
-        console.log("Video stuck at", video.currentTime);
-        setIsProcessing(false);
-        isProcessingRef.current = false;
-        return;
-      }
-
-      video.currentTime = nextTime;
-      
-      const onSeeked = () => {
-        video.removeEventListener('seeked', onSeeked);
-        requestRef.current = requestAnimationFrame(processNextFrame);
-      };
-      video.addEventListener('seeked', onSeeked);
-    } else {
-      console.log("Processing complete", { time: video.currentTime, duration: video.duration });
-      
-      // Finalize remaining
-      finalizeDigit();
-      finalizeCode();
-
-      setIsProcessing(false);
-      isProcessingRef.current = false;
-      setIsPlaying(false);
-    }
-  }, [finalizeDigit, finalizeCode]);
-
-  const stopProcessing = () => {
-    setIsProcessing(false);
-    isProcessingRef.current = false;
-    if (requestRef.current) cancelAnimationFrame(requestRef.current);
+  const onMeta = async (v: HTMLVideoElement) => {
+    setAspect(v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 16 / 9);
+    const d = Number.isFinite(v.duration) ? v.duration : 0;
+    setDuration(d);
+    setRange([0, d]);
+    // iOS Safari only decodes frames after playback has started once
+    try { await v.play(); v.pause(); } catch { /* autoplay blocked; seeking still works elsewhere */ }
+    runFind(0, d);
   };
 
-  // ROI Selection logic
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!overlayCanvasRef.current) return;
-    
-    // Ensure canvas resolution matches its display size
-    overlayCanvasRef.current.width = overlayCanvasRef.current.clientWidth;
-    overlayCanvasRef.current.height = overlayCanvasRef.current.clientHeight;
-
-    const rect = overlayCanvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    setIsSelectingROI(true);
-    setRoiStart({ x, y });
-    setRoi({ x, y, width: 0, height: 0 });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isSelectingROI || !roiStart || !overlayCanvasRef.current) return;
-    const rect = overlayCanvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    
-    setRoi({
-      x: Math.min(x, roiStart.x),
-      y: Math.min(y, roiStart.y),
-      width: Math.abs(x - roiStart.x),
-      height: Math.abs(y - roiStart.y)
+  const startReading = async () => {
+    const v = videoRef.current;
+    if (!v || !region) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setScreen('reading');
+    setProgress(0);
+    setLive({});
+    const { snapshot, samples } = await analyzeVideo(v, {
+      region, start: range[0], end: range[1], signal: ac.signal,
+      decoder: { autoThreshold: autoSens, manualThreshold, digitGap, codeGap },
+      onProgress: (p, sample, snap) => { setProgress(p); setLive({ sample, snap }); },
     });
+    if (ac.signal.aborted) return;
+    const date = new Date();
+    setResult({ codes: snapshot.codes, samples, date });
+    setHistory(addHistory({ time: date.getTime(), codes: snapshot.codes, name: videoName }));
+    setScreen('results');
   };
 
-  const handleMouseUp = () => {
-    setIsSelectingROI(false);
-    setRoiStart(null);
+  const cancelReading = () => { abortRef.current?.abort(); setScreen('locate'); };
+
+  const restart = () => {
+    abortRef.current?.abort();
+    setVideoUrl(null);
+    setResult(null);
+    setRegion(null);
+    setScreen('home');
   };
 
-  // Draw ROI overlay
-  useEffect(() => {
-    const canvas = overlayCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Draw ROI box
-    ctx.strokeStyle = '#00ff9d';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([5, 5]);
-    ctx.strokeRect(roi.x, roi.y, roi.width, roi.height);
-    
-    // Draw handle
-    ctx.fillStyle = '#00ff9d';
-    ctx.fillRect(roi.x - 4, roi.y - 4, 8, 8);
-    ctx.fillRect(roi.x + roi.width - 4, roi.y + roi.height - 4, 8, 8);
-
-    // Label
-    ctx.font = '10px JetBrains Mono';
-    ctx.fillStyle = '#00ff9d';
-    ctx.fillText('DETECTION ZONE', roi.x, roi.y - 5);
-  }, [roi]);
+  const showStage = !!videoUrl && (screen === 'locate' || screen === 'reading');
+  const totalSteps = 3;
+  const stepNo = screen === 'locate' ? 1 : screen === 'reading' ? 2 : 3;
 
   return (
-    <div className="min-h-screen p-4 md:p-8 flex flex-col gap-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tighter flex items-center gap-2">
-            <Activity className="text-[#00ff9d]" />
-            LUMEN<span className="text-[#00ff9d]">TRACE</span>
-          </h1>
-          <p className="text-sm text-zinc-500 mono uppercase tracking-widest mt-1">
-            Optical Pulse Analysis System v1.0.4
-          </p>
-        </div>
-        
-        <div className="flex items-center gap-4">
-          {!opencvLoaded ? (
-            <div className="flex items-center gap-2 text-amber-500 text-xs mono animate-pulse">
-              <RotateCcw className="w-3 h-3 animate-spin" />
-              INITIALIZING COMPUTER VISION CORE...
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 text-[#00ff9d] text-xs mono">
-              <CheckCircle2 className="w-3 h-3" />
-              CV CORE READY
-            </div>
-          )}
+    <div className="min-h-screen">
+      <a href="#main" className="sr-only focus:not-sr-only focus:absolute focus:p-3 focus:bg-surface">Skip</a>
+      <header className="border-b border-line bg-surface no-print">
+        <div className="max-w-3xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <button type="button" onClick={restart} className="flex items-center gap-3 text-left" aria-label={t.appName}>
+            <span className="grid place-items-center w-11 h-11 rounded-xl bg-accent text-accent-ink" aria-hidden>
+              <Lightbulb className="w-6 h-6" />
+            </span>
+            <span className="font-bold text-xl leading-tight">{t.appName}</span>
+          </button>
+          <SettingsBar t={t} lang={lang} setLang={setLang} size={size} setSize={setSize} theme={theme} setTheme={setTheme} />
         </div>
       </header>
 
-      <main className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Video & Controls */}
-        <div className="lg:col-span-8 flex flex-col gap-6">
-          <section className="hardware-card overflow-hidden relative group">
-            <div className="p-2 border-bottom border-[#333] flex justify-between items-center bg-[#1a1a1a]">
-              <div className="flex items-center gap-2 px-2">
-                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-[10px] mono text-zinc-400 uppercase">Live Feed / Buffer</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <Maximize2 className="w-3 h-3 text-zinc-500 cursor-pointer hover:text-white" />
-                <Settings className="w-3 h-3 text-zinc-500 cursor-pointer hover:text-white" />
-              </div>
+      <main id="main" className="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-5">
+        {screen !== 'home' && screen !== 'results' && (
+          <p className="text-ink-2 font-bold no-print" aria-live="polite">{t.step(stepNo, totalSteps)}</p>
+        )}
+
+        {/* ---------------- HOME ---------------- */}
+        {screen === 'home' && (
+          <>
+            <div>
+              <h1 ref={headingRef} tabIndex={-1} className="text-3xl sm:text-4xl font-bold leading-tight outline-none">{t.tagline}</h1>
             </div>
 
-            <div className="relative aspect-video bg-black flex items-center justify-center">
-              {videoUrl ? (
-                <>
-                  <video 
-                    ref={videoRef}
-                    src={videoUrl}
-                    className="max-w-full max-h-full"
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onLoadedMetadata={(e) => {
-                      const video = e.currentTarget;
-                      handleLoadedMetadata();
-                      if (overlayCanvasRef.current) {
-                        overlayCanvasRef.current.width = overlayCanvasRef.current.clientWidth;
-                        overlayCanvasRef.current.height = overlayCanvasRef.current.clientHeight;
-                      }
-                    }}
-                  />
-                  <canvas 
-                    ref={overlayCanvasRef}
-                    className="absolute inset-0 w-full h-full cursor-crosshair"
-                    onMouseDown={handleMouseDown}
-                    onMouseMove={handleMouseMove}
-                    onMouseUp={handleMouseUp}
-                    onMouseLeave={handleMouseUp}
-                  />
-                </>
-              ) : (
-                <div className="flex flex-col items-center gap-4 text-zinc-600">
-                  <Upload className="w-12 h-12 opacity-20" />
-                  <p className="mono text-xs uppercase tracking-widest">No Signal Detected</p>
-                  <label className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs mono cursor-pointer transition-colors border border-zinc-700">
-                    LOAD VIDEO FILE
-                    <input type="file" accept="video/*" className="hidden" onChange={handleFileChange} />
-                  </label>
-                </div>
-              )}
-
-              {isProcessing && (
-                <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center gap-4 z-50">
-                  <div className="w-48 h-1 bg-zinc-800 rounded-full overflow-hidden">
-                    <motion.div 
-                      className="h-full bg-[#00ff9d]"
-                      initial={{ width: 0 }}
-                      animate={{ width: `${progress}%` }}
-                    />
-                  </div>
-                  <p className="mono text-[10px] text-[#00ff9d] animate-pulse">
-                    ANALYZING OPTICAL DATA... {Math.round(progress)}%
-                  </p>
-                  <button 
-                    onClick={stopProcessing}
-                    className="px-3 py-1 bg-red-500/20 text-red-500 border border-red-500/50 text-[10px] mono hover:bg-red-500/30 transition-colors"
-                  >
-                    ABORT PROCESS
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Video Controls */}
-            <div className="p-4 bg-[#1a1a1a] border-t border-[#333] flex items-center gap-4">
-              <button 
-                onClick={() => videoRef.current?.paused ? videoRef.current.play() : videoRef.current?.pause()}
-                disabled={!videoUrl || isProcessing}
-                className="p-2 rounded-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 transition-colors"
-              >
-                {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              </button>
-              
-              <div className="flex-1">
-                <div className="flex justify-between text-[10px] mono text-zinc-500 mb-1">
-                  <span>00:00:00</span>
-                  <span>{videoRef.current?.duration ? new Date(videoRef.current.duration * 1000).toISOString().substr(11, 8) : '--:--:--'}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min={0} 
-                  max={videoRef.current?.duration || 100} 
-                  step={0.01}
-                  value={videoRef.current?.currentTime || 0}
-                  onChange={(e) => {
-                    if (videoRef.current) videoRef.current.currentTime = parseFloat(e.target.value);
-                  }}
-                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer"
-                />
-              </div>
-
-              <button 
-                onClick={startProcessing}
-                disabled={!videoUrl || isProcessing || !opencvLoaded}
-                className="px-4 py-2 bg-[#00ff9d] text-black font-bold text-xs mono hover:bg-[#00cc7d] disabled:opacity-50 transition-colors flex items-center gap-2"
-              >
-                <Activity className="w-3 h-3" />
-                RUN ANALYSIS
-              </button>
-            </div>
-          </section>
-
-          {/* Data Visualization */}
-          <section className="hardware-card p-6 flex flex-col gap-4">
-            <div className="flex justify-between items-center">
-              <h2 className="text-xs mono uppercase tracking-widest text-zinc-400">Luminance Profile</h2>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-[#00ff9d]" />
-                  <span className="text-[10px] mono text-zinc-500">BRIGHTNESS</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-red-500" />
-                  <span className="text-[10px] mono text-zinc-500">THRESHOLD</span>
-                </div>
-              </div>
-            </div>
-            
-            <div className="h-64 w-full relative">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={brightnessData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
-                  <XAxis 
-                    dataKey="time" 
-                    stroke="#555" 
-                    fontSize={10} 
-                    tickFormatter={(val) => val.toFixed(1) + 's'}
-                    hide={brightnessData.length === 0}
-                    type="number"
-                    domain={['auto', 'auto']}
-                  />
-                  <YAxis stroke="#555" fontSize={10} domain={[0, 255]} />
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333', fontSize: '10px', fontFamily: 'monospace' }}
-                    itemStyle={{ color: '#00ff9d' }}
-                  />
-                  <ReferenceLine y={threshold} stroke="red" strokeDasharray="3 3" />
-                  <Line 
-                    type="monotone" 
-                    dataKey="brightness" 
-                    stroke="#00ff9d" 
-                    strokeWidth={2} 
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-              {brightnessData.length === 0 && (
-                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                  <p className="text-[10px] mono text-zinc-700 uppercase tracking-widest">Waiting for data stream...</p>
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-
-        {/* Right Column: Stats & Config */}
-        <div className="lg:col-span-4 flex flex-col gap-6">
-          {/* Counter Display */}
-          <section className="hardware-card p-6 flex flex-col gap-4">
-            <h2 className="text-xs mono uppercase tracking-widest text-zinc-400">Pulse Counter</h2>
-            <div className="lcd-display p-6 rounded flex flex-col items-center justify-center gap-2">
-              <span className="text-5xl font-black mono tracking-tighter">
-                {toggleCount.toString().padStart(3, '0')}
-              </span>
-              <span className="text-[9px] mono uppercase tracking-widest opacity-70">Total Toggles</span>
-            </div>
-
-            <div className="space-y-2">
-              <h3 className="text-[10px] mono uppercase text-zinc-500">Detected Codes (2-Digit Pairs)</h3>
-              <div className="bg-black/50 p-4 rounded border border-zinc-800 min-h-[80px] flex flex-wrap gap-3 items-center">
-                {codes.map((code, i) => (
-                  <motion.div 
-                    key={i}
-                    initial={{ scale: 0.8, opacity: 0 }}
-                    animate={{ scale: 1, opacity: 1 }}
-                    className="flex items-center gap-1 bg-[#00ff9d]/5 border border-[#00ff9d]/20 p-2 rounded"
-                  >
-                    <span className="px-2 py-1 bg-[#00ff9d]/10 text-[#00ff9d] rounded mono font-bold text-xl">
-                      {code.digit1}
-                    </span>
-                    <span className="text-zinc-600 font-bold">-</span>
-                    <span className="px-2 py-1 bg-[#00ff9d]/10 text-[#00ff9d] rounded mono font-bold text-xl">
-                      {code.digit2}
-                    </span>
-                  </motion.div>
+            <section className="card p-5" aria-labelledby="how-h">
+              <h2 id="how-h" className="text-xl font-bold mb-3">{t.howTitle}</h2>
+              <ol className="flex flex-col gap-3">
+                {[t.how1, t.how2, t.how3].map((s, i) => (
+                  <li key={i} className="flex gap-3 items-start">
+                    <span className="grid place-items-center shrink-0 w-9 h-9 rounded-full bg-surface-2 font-bold" aria-hidden>{i + 1}</span>
+                    <span className="pt-1">{s}</span>
+                  </li>
                 ))}
-                
-                {/* Current incomplete code */}
-                {currentCodeDigits.length > 0 && (
-                  <div className="flex items-center gap-1 bg-amber-500/5 border border-amber-500/20 p-2 rounded animate-pulse">
-                    <span className="px-2 py-1 bg-amber-500/10 text-amber-500 rounded mono font-bold text-xl">
-                      {currentCodeDigits[0]}
-                    </span>
-                    <span className="text-zinc-600 font-bold">-</span>
-                    <span className="px-2 py-1 bg-zinc-800 text-zinc-600 rounded mono font-bold text-xl">
-                      {currentDigitCount > 0 ? currentDigitCount : '?'}
-                    </span>
-                  </div>
-                )}
+              </ol>
+            </section>
 
-                {/* Current single digit being counted */}
-                {currentCodeDigits.length === 0 && currentDigitCount > 0 && (
-                  <div className="flex items-center gap-1 bg-amber-500/5 border border-amber-500/20 p-2 rounded animate-pulse">
-                    <span className="px-2 py-1 bg-amber-500/10 text-amber-500 rounded mono font-bold text-xl">
-                      {currentDigitCount}
-                    </span>
-                  </div>
-                )}
-
-                {codes.length === 0 && currentCodeDigits.length === 0 && currentDigitCount === 0 && (
-                  <span className="text-[10px] mono text-zinc-700 uppercase">No codes detected</span>
-                )}
-              </div>
+            <div className="grid gap-3">
+              <label className="big-choice bg-accent text-accent-ink">
+                <Camera className="w-10 h-10 shrink-0" aria-hidden />
+                <span className="flex-1"><span className="block text-2xl font-bold">{t.recordVideo}</span><span className="block">{t.recordHint}</span></span>
+                <ChevronRight className="w-7 h-7" aria-hidden />
+                <input type="file" accept="video/*" capture="environment" className="sr-only" onChange={onFile} />
+              </label>
+              <label className="big-choice card">
+                <FolderOpen className="w-10 h-10 shrink-0" aria-hidden />
+                <span className="flex-1"><span className="block text-2xl font-bold">{t.chooseVideo}</span><span className="block text-ink-2">{t.chooseHint}</span></span>
+                <ChevronRight className="w-7 h-7" aria-hidden />
+                <input type="file" accept="video/*" className="sr-only" onChange={onFile} />
+              </label>
             </div>
 
-            <div className="grid grid-cols-2 gap-4 mt-2">
-              <div className="bg-zinc-900 p-3 border border-zinc-800 rounded">
-                <p className="text-[9px] mono text-zinc-500 uppercase">Avg Pulse Rate</p>
-                <p className="text-lg mono">
-                  {brightnessData.length > 0 ? (toggleCount / (brightnessData[brightnessData.length-1].time || 1)).toFixed(2) : '0.00'}
-                  <span className="text-[10px] ml-1">Hz</span>
-                </p>
+            <section aria-labelledby="hist-h" className="flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <h2 id="hist-h" className="text-xl font-bold">{t.history}</h2>
+                {history.length > 0 && (
+                  <button type="button" className="btn btn-ghost min-h-[2.75rem] py-1" onClick={() => setHistory(clearHistory())}>
+                    <Trash2 className="w-4 h-4" aria-hidden />{t.clearHistory}
+                  </button>
+                )}
               </div>
-              <div className="bg-zinc-900 p-3 border border-zinc-800 rounded">
-                <p className="text-[9px] mono text-zinc-500 uppercase">Peak Brightness</p>
-                <p className="text-lg mono">
-                  {brightnessData.length > 0 ? Math.max(...brightnessData.map(d => d.brightness)).toFixed(0) : '0'}
-                  <span className="text-[10px] ml-1">LUX</span>
-                </p>
+              {history.length === 0 ? <p className="text-ink-2">{t.noHistory}</p> : (
+                <ul className="flex flex-col gap-2">
+                  {history.map(h => {
+                    const r = buildReport(h.codes);
+                    const faults = r.entries.filter(e => e.severity !== 'info');
+                    return (
+                      <li key={h.time}>
+                        <button type="button" className="card w-full p-4 flex items-center gap-3 text-left hover:bg-surface-2"
+                          onClick={() => { setResult({ codes: h.codes, date: new Date(h.time) }); setScreen('results'); }}>
+                          <span className="flex-1 min-w-0">
+                            <span className="block font-bold">{new Date(h.time).toLocaleString(lang === 'es' ? 'es-AR' : 'en-US')}</span>
+                            <span className="block text-ink-2 truncate">
+                              {r.noFaults ? t.noFaultsShort : `${t.codesFound(faults.length)}: ${faults.map(e => e.code).join(', ')}`}
+                            </span>
+                          </span>
+                          <ChevronRight className="w-6 h-6 shrink-0" aria-hidden />
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </section>
+          </>
+        )}
+
+        {/* ---------------- LOCATE (header) ---------------- */}
+        {screen === 'locate' && (
+          <div className="flex flex-col gap-2">
+            <h1 ref={headingRef} tabIndex={-1} className="text-3xl font-bold outline-none">{t.locateTitle}</h1>
+            <p className="text-lg font-bold" aria-live="polite">
+              {findState === 'finding' && t.finding}
+              {findState === 'found' && t.foundAsk}
+              {findState === 'notfound' && !region && t.notFound}
+              {findState === 'notfound' && region && t.foundAsk}
+            </p>
+            {findState === 'finding' && (
+              <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(findProgress * 100)}>
+                <div style={{ width: `${findProgress * 100}%` }} />
               </div>
+            )}
+          </div>
+        )}
+
+        {/* ---------------- READING (header) ---------------- */}
+        {screen === 'reading' && (
+          <div className="flex flex-col gap-3">
+            <h1 ref={headingRef} tabIndex={-1} className="text-3xl font-bold outline-none">{t.readingTitle}</h1>
+            <p className="text-ink-2">{t.readingHint}</p>
+            <div className="progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
+              <div style={{ width: `${progress * 100}%` }} />
             </div>
-          </section>
+            <p className="text-right font-bold tabular-nums">{Math.round(progress * 100)}%</p>
+          </div>
+        )}
 
-          {/* Configuration */}
-          <section className="hardware-card p-6 flex flex-col gap-6">
-            <h2 className="text-xs mono uppercase tracking-widest text-zinc-400">Calibration</h2>
-            
-            <div className="space-y-6">
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-2 text-[10px] mono text-zinc-400">
-                    <Activity className="w-3 h-3" />
-                    ANALYSIS RANGE
-                  </div>
-                  <div className="text-[10px] mono text-emerald-400">
-                    {analysisStartTime.toFixed(1)}s — {analysisEndTime.toFixed(1)}s
-                  </div>
-                </div>
-                
-                <div className="space-y-4">
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[8px] mono text-zinc-600">
-                      <span>START TIME</span>
-                      <span>{analysisStartTime.toFixed(1)}s</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      min={0} 
-                      max={videoRef.current?.duration || 0} 
-                      step={0.1}
-                      value={analysisStartTime}
-                      disabled={isProcessing}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        setAnalysisStartTime(val);
-                        if (val > analysisEndTime) setAnalysisEndTime(val);
-                        if (videoRef.current) videoRef.current.currentTime = val;
-                      }}
-                      className={`w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500 ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    />
-                  </div>
-                  
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[8px] mono text-zinc-600">
-                      <span>END TIME</span>
-                      <span>{analysisEndTime.toFixed(1)}s</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      min={0} 
-                      max={videoRef.current?.duration || 0} 
-                      step={0.1}
-                      value={analysisEndTime}
-                      disabled={isProcessing}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value);
-                        setAnalysisEndTime(val);
-                        if (val < analysisStartTime) setAnalysisStartTime(val);
-                        if (videoRef.current) videoRef.current.currentTime = val;
-                      }}
-                      className={`w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500 ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}`}
-                    />
-                  </div>
-                </div>
-              </div>
+        {/* ---------------- shared video ---------------- */}
+        {videoUrl && (
+          <VideoStage
+            ref={videoRef}
+            src={videoUrl}
+            region={region}
+            aspect={aspect}
+            interactive={screen === 'locate' && findState !== 'finding'}
+            hidden={!showStage}
+            lit={screen === 'reading' && live.sample?.state === 'on'}
+            label={t.tapHint}
+            onRegion={r => { setRegion(r); if (findState === 'notfound' || findState === 'idle') setFindState('found'); }}
+            onMeta={onMeta}
+          />
+        )}
 
-              <div className="space-y-2">
-                <div className="flex justify-between items-center">
-                  <div className="flex items-center gap-2">
-                    <Zap className="w-3 h-3 text-zinc-500" />
-                    <label className="text-[10px] mono uppercase text-zinc-500">Sensitivity Threshold</label>
-                    <div className="flex items-center gap-1.5 ml-4">
-                      <span className="text-[9px] text-zinc-600 mono">AUTO</span>
-                      <button
-                        onClick={() => setIsAutoThreshold(!isAutoThreshold)}
-                        className={`w-7 h-3.5 rounded-full transition-colors relative border ${isAutoThreshold ? 'bg-emerald-500/20 border-emerald-500/50' : 'bg-zinc-800 border-zinc-700'}`}
-                      >
-                        <div className={`absolute top-0.5 w-2 h-2 rounded-full transition-all ${isAutoThreshold ? 'right-0.5 bg-emerald-400' : 'left-0.5 bg-zinc-500'}`} />
-                      </button>
-                    </div>
-                  </div>
-                  <span className="text-[10px] mono text-[#00ff9d]">{Math.round(threshold)}</span>
-                </div>
-                <input 
-                  type="range" 
-                  min={0} 
-                  max={255} 
-                  value={threshold}
-                  disabled={isAutoThreshold}
-                  onChange={(e) => setThreshold(parseInt(e.target.value))}
-                  className={`w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-[#00ff9d] ${isAutoThreshold ? 'opacity-50 cursor-not-allowed' : ''}`}
-                />
-                <p className="text-[9px] text-zinc-600 leading-relaxed italic">
-                  {isAutoThreshold 
-                    ? "Auto-detecting optimal threshold based on current luminance range."
-                    : "Adjust to filter out background noise. Values above this mark are counted as \"ON\"."
-                  }
-                </p>
-              </div>
-
-              <div className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-4">
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-[10px] mono text-zinc-400">
-                    <Info className="w-3 h-3" />
-                    PROTOCOL SPECS
-                  </div>
-                  <ul className="text-[9px] text-zinc-500 space-y-2 list-disc ml-4">
-                    <li><span className="text-zinc-300">Intra-Digit:</span> Gap &lt; 1.1s (Same digit).</li>
-                    <li><span className="text-zinc-300">Inter-Digit:</span> Gap 1.1s - 2.0s (Next digit).</li>
-                    <li><span className="text-zinc-300">Inter-Code:</span> Gap &gt; 2.0s (New code).</li>
-                  </ul>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 text-[10px] mono text-zinc-400">
-                    <Info className="w-3 h-3" />
-                    INSTRUCTIONS
-                  </div>
-                  <ol className="text-[10px] text-zinc-500 space-y-2 list-decimal ml-4">
-                    <li>Upload a video of the light source.</li>
-                    <li>Select the detection zone (green box).</li>
-                    <li>Enable "AUTO" sensitivity for automatic detection.</li>
-                    <li>Click "RUN ANALYSIS" to process.</li>
-                  </ol>
-                </div>
-              </div>
-            </div>
-
-            <button 
-              onClick={() => {
-                setBrightnessData([]);
-                setToggleCount(0);
-                setCodes([]);
-                setCurrentDigitCount(0);
-                setCurrentCodeDigits([]);
-                setProgress(0);
-                setThreshold(128);
-                thresholdRef.current = 128;
-                brightnessWindowRef.current = [];
-                if (videoRef.current) videoRef.current.currentTime = 0;
-              }}
-              className="w-full py-3 border border-zinc-700 text-zinc-400 text-[10px] mono uppercase hover:bg-zinc-800 hover:text-white transition-all flex items-center justify-center gap-2"
-            >
-              <RotateCcw className="w-3 h-3" />
-              Reset System Memory
+        {/* ---------------- LOCATE (actions) ---------------- */}
+        {screen === 'locate' && findState !== 'finding' && (
+          <>
+            <p className="text-ink-2">{t.tapHint}</p>
+            <button type="button" className="btn btn-primary w-full text-xl min-h-[4rem]" disabled={!region} onClick={startReading}>
+              <Play className="w-6 h-6" aria-hidden />{t.yesRead}
             </button>
-          </section>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button type="button" className="btn btn-secondary" onClick={() => runFind(range[0], range[1])}>
+                <Search className="w-5 h-5" aria-hidden />{t.findAgain}
+              </button>
+              <button type="button" className="btn btn-ghost" onClick={restart}>{t.pickOther}</button>
+            </div>
 
-          {/* Status Panel */}
-          <section className="hardware-card p-4 bg-zinc-900/30">
-            <div className="flex items-center gap-3">
-              <div className={`w-2 h-2 rounded-full ${isProcessing ? 'bg-amber-500 animate-pulse' : 'bg-[#00ff9d]'}`} />
-              <div className="flex flex-col">
-                <span className="text-[10px] mono uppercase tracking-tighter">
-                  System Status: {isProcessing ? 'PROCESSING' : 'IDLE'}
-                </span>
-                <span className="text-[8px] mono text-zinc-600">
-                  {videoFile ? `FILE: ${videoFile.name}` : 'NO SOURCE LOADED'}
-                </span>
+            <details className="card p-4">
+              <summary className="cursor-pointer font-bold">{t.advanced}</summary>
+              <div className="flex flex-col gap-5 mt-4">
+                <Slider label={t.startAt} value={range[0]} min={0} max={duration} step={0.1} unit="s"
+                  onChange={v => { setRange([v, Math.max(v, range[1])]); if (videoRef.current) videoRef.current.currentTime = v; }} />
+                <Slider label={t.endAt} value={range[1]} min={0} max={duration} step={0.1} unit="s"
+                  onChange={v => { setRange([Math.min(v, range[0]), v]); if (videoRef.current) videoRef.current.currentTime = v; }} />
+                <label className="flex items-center gap-3 min-h-[2.75rem] cursor-pointer">
+                  <input type="checkbox" className="w-6 h-6 accent-[var(--accent)]" checked={autoSens} onChange={e => setAutoSens(e.target.checked)} />
+                  <span className="font-bold">{t.autoSens}</span>
+                </label>
+                {!autoSens && <Slider label={t.sensitivity} value={manualThreshold} min={0} max={255} step={1} onChange={setManualThreshold} />}
+                <Slider label={t.digitGap} value={digitGap} min={0.4} max={3} step={0.1} unit="s" onChange={v => { setDigitGap(v); if (v >= codeGap) setCodeGap(+(v + 0.1).toFixed(1)); }} />
+                <Slider label={t.codeGap} value={codeGap} min={0.6} max={6} step={0.1} unit="s" onChange={v => { setCodeGap(v); if (v <= digitGap) setDigitGap(+(v - 0.1).toFixed(1)); }} />
+              </div>
+            </details>
+          </>
+        )}
+
+        {/* ---------------- READING (live) ---------------- */}
+        {screen === 'reading' && (
+          <>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="card p-4 text-center">
+                <p className="text-ink-2 font-bold">{t.blinks}</p>
+                <p className="text-4xl font-bold tabular-nums">{live.snap?.blinks ?? 0}</p>
+              </div>
+              <div className="card p-4 text-center">
+                <p className="text-ink-2 font-bold">{t.counting}</p>
+                <p className="text-4xl font-bold tabular-nums">
+                  {live.snap ? [...live.snap.pendingDigits, live.snap.currentCount || '…'].join(' – ') : '…'}
+                </p>
               </div>
             </div>
-          </section>
-        </div>
+            {!!live.snap?.codes.length && (
+              <ul className="flex flex-wrap gap-2" aria-live="polite">
+                {live.snap.codes.map((c, i) => (
+                  <li key={i} className="card px-3 py-2">
+                    <span className="font-bold text-xl tabular-nums">{c}</span>
+                    <span className="text-ink-2 ml-2">{lookupCode(c)?.title[lang] ?? '?'}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button type="button" className="btn btn-secondary w-full" onClick={cancelReading}>
+              <X className="w-5 h-5" aria-hidden />{t.cancel}
+            </button>
+          </>
+        )}
+
+        {/* ---------------- RESULTS ---------------- */}
+        {screen === 'results' && result && (
+          <>
+            <h1 ref={headingRef} tabIndex={-1} className="sr-only">{t.resultsTitle}</h1>
+            <Suspense fallback={<p>…</p>}><Results t={t} lang={lang} codes={result.codes} samples={result.samples} date={result.date} onRestart={restart} /></Suspense>
+          </>
+        )}
       </main>
+    </div>
+  );
+}
 
-      {/* Hidden processing canvas */}
-      <canvas ref={canvasRef} className="hidden" />
-
-      {/* Footer */}
-      <footer className="mt-auto pt-8 border-t border-[#333] flex justify-between items-center opacity-30 grayscale hover:grayscale-0 hover:opacity-100 transition-all">
-        <div className="text-[9px] mono text-zinc-500">
-          SECURE OPTICAL ANALYSIS PROTOCOL // ENCRYPTED DATA STREAM
-        </div>
-        <div className="flex gap-4">
-          <div className="text-[9px] mono text-zinc-500">LATENCY: 12ms</div>
-          <div className="text-[9px] mono text-zinc-500">BUFFER: 1024KB</div>
-        </div>
-      </footer>
+function Slider({ label, value, min, max, step, unit = '', onChange }: {
+  label: string; value: number; min: number; max: number; step: number; unit?: string; onChange: (v: number) => void;
+}) {
+  const id = useMemo(() => `s-${Math.random().toString(36).slice(2)}`, []);
+  return (
+    <div>
+      <div className="flex justify-between font-bold">
+        <label htmlFor={id}>{label}</label>
+        <span className="tabular-nums">{value.toFixed(step < 1 ? 1 : 0)}{unit}</span>
+      </div>
+      <input id={id} type="range" min={min} max={max || 0} step={step} value={value} onChange={e => onChange(parseFloat(e.target.value))} />
     </div>
   );
 }
