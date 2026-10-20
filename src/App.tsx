@@ -1,5 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Camera, FolderOpen, Search, Play, X, ChevronRight, Trash2, Lightbulb } from 'lucide-react';
+import { Camera, FolderOpen, Search, Play, X, ChevronRight, Trash2, Lightbulb, Github } from 'lucide-react';
+import { Footer } from './components/Footer';
+import { PROJECT } from './project';
 import { STRINGS, Lang, detectLang } from './i18n';
 import { SettingsBar, TextSize, Theme } from './components/Settings';
 import { VideoStage } from './components/VideoStage';
@@ -150,7 +152,13 @@ export default function App() {
             </span>
             <span className="font-bold text-xl leading-tight">{t.appName}</span>
           </button>
-          <SettingsBar t={t} lang={lang} setLang={setLang} size={size} setSize={setSize} theme={theme} setTheme={setTheme} />
+          <div className="flex flex-wrap items-center gap-2">
+            <SettingsBar t={t} lang={lang} setLang={setLang} size={size} setSize={setSize} theme={theme} setTheme={setTheme} />
+            <a href={PROJECT.repoUrl} target="_blank" rel="noopener noreferrer" aria-label={t.githubRepo} title={t.githubRepo}
+              className="grid place-items-center w-11 h-11 rounded-xl border border-line bg-surface hover:bg-surface-2 no-print">
+              <Github className="w-6 h-6" aria-hidden />
+            </a>
+          </div>
         </div>
       </header>
 
@@ -346,6 +354,7 @@ export default function App() {
           </>
         )}
       </main>
+      <Footer t={t} />
     </div>
   );
 }

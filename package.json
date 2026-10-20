@@ -2,6 +2,25 @@
   "name": "dodge-code-reader",
   "private": true,
   "version": "2.0.0",
+  "description": "Read Chrysler/Dodge check-engine flash codes from a video of the dashboard lamp. Offline PWA.",
+  "author": "Ezequiel Augusto Stanganelli (https://github.com/eastanganelli)",
+  "homepage": "https://eastanganelli.github.io/DodgeCodeReader/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eastanganelli/DodgeCodeReader.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eastanganelli/DodgeCodeReader/issues"
+  },
+  "keywords": [
+    "dodge",
+    "chrysler",
+    "obd1",
+    "check-engine",
+    "flash-codes",
+    "pwa",
+    "diagnostics"
+  ],
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",

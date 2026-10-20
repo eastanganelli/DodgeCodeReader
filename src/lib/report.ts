@@ -53,7 +53,7 @@ export function buildReport(codes: number[]): CodeReport {
   return { entries, endMarkerSeen, noFaults, totalRead: codes.length };
 }
 
-export function reportToText(report: CodeReport, lang: 'en' | 'es', date = new Date()): string {
+export function reportToText(report: CodeReport, lang: 'en' | 'es', date = new Date(), footer?: string): string {
   const L = lang === 'es'
     ? { title: 'Reporte de códigos – Dodge', none: 'No se encontraron fallas.', noEnd: 'Atención: no se detectó el código 55 (fin). La lectura puede estar incompleta.', unknown: 'Código desconocido' }
     : { title: 'Dodge code report', none: 'No faults found.', noEnd: 'Note: end code 55 was not detected. Reading may be incomplete.', unknown: 'Unknown code' };
@@ -65,5 +65,6 @@ export function reportToText(report: CodeReport, lang: 'en' | 'es', date = new D
     if (e.info) lines.push(`   ${e.info.description[lang]}`);
   }
   if (!report.endMarkerSeen) lines.push('', L.noEnd);
+  if (footer) lines.push('', footer);
   return lines.join('\n');
 }

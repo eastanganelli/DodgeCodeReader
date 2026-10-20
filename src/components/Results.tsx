@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } fro
 import type { Lang, Strings } from '../i18n';
 import { buildReport, reportToText, ReportEntry } from '../lib/report';
 import type { Sample } from '../lib/pulseDecoder';
+import { PROJECT } from '../project';
 
 interface Props {
   t: Strings;
@@ -34,7 +35,7 @@ function SevIcon({ s }: { s: ReportEntry['severity'] }) {
 
 export function Results({ t, lang, codes, samples, date, onRestart }: Props) {
   const report = useMemo(() => buildReport(codes), [codes]);
-  const text = useMemo(() => reportToText(report, lang, date), [report, lang, date]);
+  const text = useMemo(() => reportToText(report, lang, date, `${t.sharedFrom}: ${PROJECT.appUrl}`), [report, lang, date, t]);
   const [copied, setCopied] = useState(false);
   const faults = report.entries.filter(e => e.severity !== 'info');
 

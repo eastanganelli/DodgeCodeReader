@@ -7,9 +7,13 @@
 **Read Chrysler / Dodge check-engine codes from a video of the dashboard light.**<br/>
 No scanner, no cables. Works on any phone or computer, offline, in Spanish and English.
 
-[![Deploy](https://github.com/eastanganelli/DodgeCodeReader/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/eastanganelli/DodgeCodeReader/actions/workflows/deploy-pages.yml)
+[![Open the app](https://img.shields.io/badge/Open%20the%20app-eastanganelli.github.io-f2b705?style=for-the-badge&logo=googlechrome&logoColor=black)](https://eastanganelli.github.io/DodgeCodeReader/)
+[![GitHub repo](https://img.shields.io/badge/GitHub-DodgeCodeReader-181717?style=for-the-badge&logo=github)](https://github.com/eastanganelli/DodgeCodeReader)
 
-[**Open the app →**](https://eastanganelli.github.io/DodgeCodeReader/)
+[![Deploy](https://github.com/eastanganelli/DodgeCodeReader/actions/workflows/deploy-pages.yml/badge.svg)](https://github.com/eastanganelli/DodgeCodeReader/actions/workflows/deploy-pages.yml)
+[![Issues](https://img.shields.io/github/issues/eastanganelli/DodgeCodeReader)](https://github.com/eastanganelli/DodgeCodeReader/issues)
+![PWA](https://img.shields.io/badge/PWA-offline%20ready-5a0fc8)
+![Languages](https://img.shields.io/badge/lang-ES%20%7C%20EN-blue)
 
 [User guide](docs/user-guide.md) · [Guía de usuario](docs/guia-de-usuario.md) · [Developer guide](docs/developer-guide.md) · [Code list](docs/fault-codes.md)
 
@@ -82,6 +86,33 @@ lamp behaviour (`**` lamp on, `*` intermittent). Full table:
 ## Built with
 
 React · TypeScript · Vite · Tailwind CSS · vite-plugin-pwa · Canvas 2D (no OpenCV)
+
+## Contributing
+
+Bug reports, new recordings and code improvements are welcome.
+
+- Found a wrong reading? [Open an issue](https://github.com/eastanganelli/DodgeCodeReader/issues)
+  with the vehicle (year, model, engine), the codes you expected and, if possible, the video.
+- Want to change code? Read the [developer guide](docs/developer-guide.md), run `npm test`,
+  and open a pull request.
+
+## Author
+
+<table>
+  <tr>
+    <td>
+      <a href="https://github.com/eastanganelli"><img src="https://github.com/eastanganelli.png?size=120" width="80" alt="Ezequiel Augusto Stanganelli" /></a>
+    </td>
+    <td>
+      <b>Ezequiel Augusto Stanganelli</b><br/>
+      Software and firmware developer working on automotive diagnostics.<br/>
+      <a href="https://github.com/eastanganelli">@eastanganelli on GitHub</a>
+    </td>
+  </tr>
+</table>
+
+This project grew out of keeping a 1994 Dodge Dakota running: reading flash codes by
+counting blinks is slow and error-prone, so the phone does the counting.
 
 ## Disclaimer
 

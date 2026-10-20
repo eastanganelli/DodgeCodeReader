@@ -144,6 +144,17 @@ its full results again. **Clear** deletes them. They are stored only on your dev
 | Camera does not open | Allow camera access for the site in your browser settings. Or use **Choose a video**. |
 | Slow on old phones | Trim the video with **Start at / End at**. |
 
+## Help and feedback
+
+At the bottom of every screen:
+
+- **Source code on GitHub** – the project page.
+- **Report a problem** – tell the developer about a wrong reading or a bug.
+  Include your vehicle (year, model, engine) and, if you can, the video.
+- **About the developer** – Ezequiel Augusto Stanganelli's GitHub profile.
+
+Shared reports end with a link to the app, so whoever receives them can open it too.
+
 ## Privacy
 
 Everything happens on your device. **Your video is never uploaded.** History and

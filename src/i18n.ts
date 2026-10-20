@@ -69,6 +69,14 @@ const en = {
   readAnother: 'Read another video',
   signal: 'Light signal (for experts)',
   rawSequence: 'Codes in the order they blinked',
+  madeBy: 'Made by',
+  projectLinks: 'Project links',
+  sourceCode: 'Source code on GitHub',
+  reportProblem: 'Report a problem',
+  aboutDev: 'About the developer',
+  privacyNote: 'Free and open source. Your videos never leave your device.',
+  githubRepo: 'GitHub repository',
+  sharedFrom: 'Read with Dodge Code Reader',
   disclaimer: 'This tool helps you understand the codes. Ask a mechanic before replacing parts.',
 };
 
@@ -141,6 +149,14 @@ const es: typeof en = {
   readAnother: 'Leer otro video',
   signal: 'Señal de la luz (para expertos)',
   rawSequence: 'Códigos en el orden en que parpadearon',
+  madeBy: 'Hecho por',
+  projectLinks: 'Enlaces del proyecto',
+  sourceCode: 'Código fuente en GitHub',
+  reportProblem: 'Reportar un problema',
+  aboutDev: 'Sobre el desarrollador',
+  privacyNote: 'Gratis y de código abierto. Tus videos nunca salen de tu dispositivo.',
+  githubRepo: 'Repositorio en GitHub',
+  sharedFrom: 'Leído con Lector de Códigos Dodge',
   disclaimer: 'Esta herramienta te ayuda a entender los códigos. Consultá a un mecánico antes de cambiar piezas.',
 };
 

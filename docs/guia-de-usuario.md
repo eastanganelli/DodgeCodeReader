@@ -144,6 +144,17 @@ para volver a ver los resultados. **Borrar** las elimina. Se guardan solo en tu 
 | No se abre la cámara | Permití el acceso a la cámara para el sitio en la configuración del navegador. O usá **Elegir un video**. |
 | Lento en celulares viejos | Recortá el video con **Empezar en / Terminar en**. |
 
+## Ayuda y comentarios
+
+Abajo de todo, en cada pantalla:
+
+- **Código fuente en GitHub**: la página del proyecto.
+- **Reportar un problema**: avisale al desarrollador de una lectura equivocada o un error.
+  Indicá tu vehículo (año, modelo, motor) y, si podés, el video.
+- **Sobre el desarrollador**: el perfil de GitHub de Ezequiel Augusto Stanganelli.
+
+Los reportes compartidos terminan con un enlace a la app, así quien los recibe también puede abrirla.
+
 ## Privacidad
 
 Todo se procesa en tu dispositivo. **Tu video nunca se sube a internet.** El historial y

@@ -64,9 +64,11 @@ phone on the same network (`http://<your-pc-ip>:3000`).
 │   ├── main.tsx                         React entry
 │   ├── App.tsx                          screens + flow state machine
 │   ├── i18n.ts                          ES / EN strings
+│   ├── project.ts                       author, repo, app URL, version (from package.json)
 │   ├── index.css                        theme tokens, components, print styles
 │   ├── components/
 │   │   ├── Settings.tsx                 text size / language / theme toolbar
+│   │   ├── Footer.tsx                   author credit, GitHub / issues links, version
 │   │   ├── VideoStage.tsx               <video> + tap/drag detection box
 │   │   └── Results.tsx                  report cards, share/copy/print, chart (lazy-loaded)
 │   ├── data/
@@ -296,6 +298,14 @@ all app tabs/windows and reopen.
 
 Wrap `dist/` with Capacitor (`npx cap add android|ios`). No code changes needed; build
 with `BASE_PATH=/`.
+
+### Project links and version
+
+Author, repository, issues and app URLs live in `src/project.ts` (used by the header GitHub
+button, the footer and the shared report). The version shown in the footer comes from
+`package.json` via the `__APP_VERSION__` define in `vite.config.ts` – bump it there on release.
+If the repo moves, update `src/project.ts`, `index.html` (canonical / Open Graph tags) and
+`package.json` (`homepage`, `repository`, `bugs`).
 
 ## Conventions
 
